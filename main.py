@@ -1,18 +1,24 @@
 import os
+import logging
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from google import genai
 from google.genai import types
 # ==========================================
-# 1. CREATE FASTAPI APP
+# 1. LOGGING
+# ==========================================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("ecobite")
+# ==========================================
+# 2. FASTAPI APPLICATION
 # ==========================================
 app = FastAPI(
-    title="EcoBite AI API",
-    description="AI-powered leftover food analysis",
+    title="EcoBite AI",
+    description="AI Leftover Food Analysis API",
     version="1.0.0"
 )
 # ==========================================
-# 2. ENABLE CORS
+# 3. CORS CONFIGURATION
 # ==========================================
 app.add_middleware(
     CORSMiddleware,
@@ -22,118 +28,150 @@ app.add_middleware(
     allow_headers=["*"],
 )
 # ==========================================
-# 3. CONNECT TO GEMINI API
+# 4. GEMINI CONFIGURATION
 # ==========================================
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-client = (
-    genai.Client(api_key=GEMINI_API_KEY)
-    if GEMINI_API_KEY
-    else None
-)
+client = None
+if GEMINI_API_KEY:
+    client = genai.Client(
+        api_key=GEMINI_API_KEY
+    )
+    logger.info("Gemini API key detected.")
+else:
+    logger.warning("GEMINI_API_KEY is missing.")
 # ==========================================
-# 4. HOME ENDPOINT
+# 5. HOME ENDPOINT
 # ==========================================
 @app.get("/")
 async def home():
     return {
         "success": True,
-        "message": "EcoBite AI API is running!"
+        "message": "EcoBite AI backend is running."
     }
 # ==========================================
-# 5. HEALTH CHECK
+# 6. HEALTH CHECK
 # ==========================================
 @app.get("/health")
-async def health_check():
+async def health():
     return {
         "success": True,
         "gemini_configured": client is not None
     }
 # ==========================================
-# 6. ANALYZE LEFTOVER FOOD
+# 7. ANALYZE LEFTOVER FOOD
 # ==========================================
 @app.post("/analyze")
-async def analyze_food(image: UploadFile = File(...)):
-    # Check API key
+async def analyze_food(
+    image: UploadFile = File(...)
+):
+    # Check Gemini API configuration
     if client is None:
         raise HTTPException(
             status_code=500,
-            detail="GEMINI_API_KEY is missing from environment variables."
+            detail="GEMINI_API_KEY is not configured."
         )
-    # Check uploaded file
+    # Validate uploaded image
     if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(
             status_code=400,
-            detail="Please upload a valid image file."
+            detail="Please upload a valid image."
         )
     try:
-        # Read image
+        # Read uploaded image
         image_bytes = await image.read()
         if not image_bytes:
             raise HTTPException(
                 status_code=400,
                 detail="Uploaded image is empty."
             )
-        # Prepare image MIME type
-        mime_type = image.content_type
-        # Prepare prompt
+        logger.info(
+            "Received image: %s, type: %s, size: %s bytes",
+            image.filename,
+            image.content_type,
+            len(image_bytes)
+        )
+        # Prompt for Gemini
         prompt = """
-        You are EcoBite AI, an assistant that analyzes leftover food.
-        Analyze the uploaded image and provide:
-        1. Food identification:
-           Identify the visible food as accurately as possible.
-        2. Estimated leftover mass:
-           Estimate the mass of the visible leftover food in grams.
-        3. Confidence and limitations:
-           Explain that the mass is only a visual estimate.
-           The actual weight must be verified using a weighing scale.
-           If the image does not provide enough information for a
-           reasonable estimate, clearly state this limitation.
-        4. Food waste advice:
-           Give one short, practical suggestion to reduce food waste.
-        Important:
-        - Do not claim that the estimated weight is an exact measurement.
-        - Do not invent details that cannot be determined from the image.
-        - Keep the response clear and easy to understand.
-        """
-        # Send image and prompt to Gemini
+You are EcoBite AI, an assistant that helps reduce food waste.
+Analyze the uploaded image and provide the following:
+1. FOOD IDENTIFICATION
+Identify the visible food. If uncertain, explain the uncertainty.
+2. ESTIMATED LEFTOVER MASS
+Estimate the mass of the visible leftover food in grams.
+Give a reasonable approximate range if an exact estimate is not possible.
+3. ESTIMATE LIMITATION
+Clearly explain that the weight is a visual estimate only.
+The actual weight must be verified using a weighing scale.
+Do not claim that image analysis provides an exact measurement.
+4. FOOD WASTE REDUCTION TIP
+Provide one short, practical suggestion for reducing food waste.
+If the image does not show food clearly, say so instead of guessing.
+Use clear, simple English with headings.
+"""
+        # Prepare Gemini contents
+        contents = [
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(
+                        text=prompt
+                    ),
+                    types.Part.from_bytes(
+                        data=image_bytes,
+                        mime_type=image.content_type
+                    )
+                ]
+            )
+        ]
+        logger.info("Sending image to Gemini.")
+        # Generate analysis
         response = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=[
-                types.Content(
-                    role="user",
-                    parts=[
-                        types.Part.from_text(
-                            text=prompt
-                        ),
-                        types.Part.from_bytes(
-                            data=image_bytes,
-                            mime_type=mime_type
-                        )
-                    ]
-                )
-            ]
+            contents=contents
         )
-        # Get AI response
+        # Extract response text
         analysis_text = response.text
-        if not analysis_text:
+        # Log response metadata without logging image contents
+        logger.info(
+            "Gemini response received. Text available: %s",
+            bool(analysis_text and analysis_text.strip())
+        )
+        # Handle empty response
+        if not analysis_text or not analysis_text.strip():
+            logger.error(
+                "Gemini returned no text. Finish reason: %s",
+                getattr(
+                    getattr(response, "candidates", [None])[0],
+                    "finish_reason",
+                    None
+                ) if getattr(response, "candidates", None) else None
+            )
             raise HTTPException(
                 status_code=502,
-                detail="Gemini returned an empty response."
+                detail=(
+                    "Gemini returned no text. "
+                    "Check the backend logs for response details."
+                )
             )
-        # Return result
+        # Return successful analysis
         return {
             "success": True,
             "filename": image.filename,
-            "food_type": "See analysis",
-            "analysis": analysis_text
+            "analysis": analysis_text.strip()
         }
     except HTTPException:
         raise
     except Exception as error:
-        print(
-            f"Gemini API error: {type(error).__name__}: {error}"
+        logger.exception(
+            "Gemini analysis failed: %s",
+            type(error).__name__
         )
         raise HTTPException(
             status_code=502,
-            detail=f"AI analysis failed: {type(error).__name__}: {error}"
+            detail=(
+                f"AI analysis failed: "
+                f"{type(error).__name__}: {str(error)}"
+            )
         )
+    finally:
+        await image.close()
