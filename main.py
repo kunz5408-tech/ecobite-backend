@@ -27,8 +27,7 @@ async def analyze_food(image: UploadFile = File(...)):
                 "Analyze this leftover food image. Identify the food "
                 "and estimate its leftover mass in grams. State that "
                 "the weight is only a visual estimate and must be "
-                "verified using a scale."
-            ,
+                "verified using a scale.",
                 {
                     "mime_type": image.content_type,
                     "data": base64.b64encode(image_bytes).decode("utf-8")
@@ -36,5 +35,5 @@ async def analyze_food(image: UploadFile = File(...)):
             ]
         )
         return {"success": True, "analysis": result.text}
-    except Exception:
-        raise HTTPException(502, "AI analysis failed")
+    except Exception as e:
+        raise HTTPException(502, f"AI analysis failed: {str(e)}")
